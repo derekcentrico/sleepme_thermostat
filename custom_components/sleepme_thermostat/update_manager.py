@@ -9,8 +9,6 @@ from .sleepme import SleepMeClient
 
 _LOGGER = logging.getLogger(__name__)
 
-COMMAND_REFRESH_DELAY_S = 5
-
 
 class SleepMeUpdateManager(DataUpdateCoordinator):
     """Manages data updates for SleepMe devices."""
@@ -48,3 +46,7 @@ class SleepMeUpdateManager(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("An unexpected error occurred during status update: %s", err)
             raise UpdateFailed(f"Error during status update: {err}") from err
+
+    def async_set_updated_data(self, data: dict[str, Any]) -> None:
+        """Manually set new data for the coordinator."""
+        self.async_set_updated_data(data)
