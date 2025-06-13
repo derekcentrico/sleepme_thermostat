@@ -14,7 +14,8 @@ from .update_manager import SleepMeUpdateManager
 
 _LOGGER = logging.getLogger(__name__)
 
-COMMAND_REFRESH_DELAY_S = 5 
+COMMAND_REFRESH_DELAY_S = 5
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -22,16 +23,15 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the SleepMe switch entities."""
-    device_id = config_entry.data.get("device_id")
-    device_display_name = config_entry.data.get("display_name")
-    update_manager = hass.data[DOMAIN][f"{device_id}_update_manager"]
-    client = hass.data[DOMAIN]["sleepme_controller"]
-    device_info_data = hass.data[DOMAIN]["device_info"]
+    entry_data = hass.data[DOMAIN][config_entry.entry_id]
+    update_manager = entry_data["update_manager"]
+    client = entry_data["client"]
+    device_info_data = entry_data["device_info"]
 
     async_add_entities(
         [
             SleepMeScheduleSwitch(
-                update_manager, client, device_id, device_display_name, device_info_data
+                update_manager, client, device_info_data
             )
         ]
     )
@@ -40,24 +40,19 @@ async def async_setup_entry(
 class SleepMeScheduleSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of a SleepMe schedule switch."""
 
-    def __init__(
-        self,
-        coordinator: SleepMeUpdateManager,
-        client: SleepMeClient,
-        device_id: str,
-        device_display_name: str,
-        device_info_data: dict,
-    ):
+    def __init__(self, coordinator: SleepMeUpdateManager, client: SleepMeClient, device_info_data: dict):
         """Initialize the switch."""
         super().__init__(coordinator)
         self.client = client
-        self._device_id = device_id
-        self._attr_name = f"{device_display_name} {SCHEDULE_SWITCH_NAME}"
-        self._attr_unique_id = f"{device_id}_schedule_switch"
+        
+        display_name = device_info_data["display_name"]
+
+        self._attr_name = f"{display_name} {SCHEDULE_SWITCH_NAME}"
+        self._attr_unique_id = f"{client.device_id}_schedule_switch"
 
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": device_display_name,
+            "identifiers": {(DOMAIN, client.device_id)},
+            "name": display_name,
             "manufacturer": MANUFACTURER,
             "model": device_info_data.get("model"),
             "sw_version": device_info_data.get("firmware_version"),
@@ -66,21 +61,22 @@ class SleepMeScheduleSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return true if the schedule is enabled."""
-        control = self.coordinator.data.get("control", {})
-        return control.get("has_schedule_enabled", False)
+        if self.coordinator.data and (control := self.coordinator.data.get("control", {})):
+            return control.get("has_schedule_enabled", False)
+        return False
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the device schedule on."""
         if await self.client.set_schedule_enabled(True):
-            control = self.coordinator.data.get("control", {})
-            control["has_schedule_enabled"] = True
-            self.async_write_ha_state()
+            if self.coordinator.data and "control" in self.coordinator.data:
+                self.coordinator.data["control"]["has_schedule_enabled"] = True
+                self.async_write_ha_state()
             async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the device schedule off."""
         if await self.client.set_schedule_enabled(False):
-            control = self.coordinator.data.get("control", {})
-            control["has_schedule_enabled"] = False
-            self.async_write_ha_state()
+            if self.coordinator.data and "control" in self.coordinator.data:
+                self.coordinator.data["control"]["has_schedule_enabled"] = False
+                self.async_write_ha_state()
             async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)

@@ -8,6 +8,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
+from .sleepme import SleepMeClient
+from .update_manager import SleepMeUpdateManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,15 +20,15 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the SleepMe sensor entities."""
-    device_id = config_entry.data.get("device_id")
-    device_display_name = config_entry.data.get("display_name")
-    update_manager = hass.data[DOMAIN][f"{device_id}_update_manager"]
-    device_info_data = hass.data[DOMAIN]["device_info"]
+    entry_data = hass.data[DOMAIN][config_entry.entry_id]
+    update_manager = entry_data["update_manager"]
+    client = entry_data["client"]
+    device_info_data = entry_data["device_info"]
 
     sensors = [
-        SleepMeWaterLevelPercentSensor(update_manager, device_id, device_display_name, device_info_data),
-        SleepMeSetTemperatureSensor(update_manager, device_id, device_display_name, device_info_data),
-        SleepMeCurrentTemperatureSensor(update_manager, device_id, device_display_name, device_info_data),
+        SleepMeWaterLevelPercentSensor(update_manager, client, device_info_data),
+        SleepMeSetTemperatureSensor(update_manager, client, device_info_data),
+        SleepMeCurrentTemperatureSensor(update_manager, client, device_info_data),
     ]
     async_add_entities(sensors)
 
@@ -34,16 +36,18 @@ async def async_setup_entry(
 class BaseSleepMeSensor(CoordinatorEntity, SensorEntity):
     """Base class for SleepMe sensors."""
 
-    def __init__(self, coordinator, device_id, device_display_name, device_info_data, sensor_name, unique_id_suffix):
+    def __init__(self, coordinator: SleepMeUpdateManager, client: SleepMeClient, device_info_data: dict, sensor_name: str, unique_id_suffix: str):
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_name = f"{device_display_name} {sensor_name}"
-        self._attr_unique_id = f"{device_id}_{unique_id_suffix}"
+        
+        display_name = device_info_data["display_name"]
+        
+        self._attr_name = f"{display_name} {sensor_name}"
+        self._attr_unique_id = f"{client.device_id}_{unique_id_suffix}"
         
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": device_display_name,
+            "identifiers": {(DOMAIN, client.device_id)},
+            "name": display_name,
             "manufacturer": MANUFACTURER,
             "model": device_info_data.get("model"),
             "sw_version": device_info_data.get("firmware_version"),
@@ -53,46 +57,49 @@ class BaseSleepMeSensor(CoordinatorEntity, SensorEntity):
 class SleepMeWaterLevelPercentSensor(BaseSleepMeSensor):
     """Representation of the water level percentage sensor."""
 
-    def __init__(self, coordinator, device_id, device_display_name, device_info_data):
+    def __init__(self, coordinator: SleepMeUpdateManager, client: SleepMeClient, device_info_data: dict):
         """Initialize the sensor."""
-        super().__init__(coordinator, device_id, device_display_name, device_info_data, "Water Level", "water_level_percent")
+        super().__init__(coordinator, client, device_info_data, "Water Level", "water_level_percent")
         self._attr_native_unit_of_measurement = PERCENTAGE
         self._attr_icon = "mdi:water-percent"
 
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        status = self.coordinator.data.get("status", {})
-        return status.get("water_level_percent")
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            return status.get("water_level_percent")
+        return None
 
 
 class SleepMeSetTemperatureSensor(BaseSleepMeSensor):
     """Representation of the set temperature sensor."""
 
-    def __init__(self, coordinator, device_id, device_display_name, device_info_data):
+    def __init__(self, coordinator: SleepMeUpdateManager, client: SleepMeClient, device_info_data: dict):
         """Initialize the sensor."""
-        super().__init__(coordinator, device_id, device_display_name, device_info_data, "Set Temperature", "set_temp")
+        super().__init__(coordinator, client, device_info_data, "Set Temperature", "set_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
 
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        status = self.coordinator.data.get("status", {})
-        return status.get("set_temperature_c")
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            return status.get("set_temperature_c")
+        return None
 
 
 class SleepMeCurrentTemperatureSensor(BaseSleepMeSensor):
     """Representation of the current temperature sensor."""
 
-    def __init__(self, coordinator, device_id, device_display_name, device_info_data):
+    def __init__(self, coordinator: SleepMeUpdateManager, client: SleepMeClient, device_info_data: dict):
         """Initialize the sensor."""
-        super().__init__(coordinator, device_id, device_display_name, device_info_data, "Current Temperature", "current_temp")
+        super().__init__(coordinator, client, device_info_data, "Current Temperature", "current_temp")
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
 
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        status = self.coordinator.data.get("status", {})
-        return status.get("current_temperature_c")
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            return status.get("current_temperature_c")
+        return None
