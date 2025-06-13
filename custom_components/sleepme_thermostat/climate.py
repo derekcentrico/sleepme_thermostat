@@ -33,17 +33,16 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the SleepMe climate entities."""
-    device_id = config_entry.data.get("device_id")
-    device_display_name = config_entry.data.get("display_name")
-    update_manager = hass.data[DOMAIN][f"{device_id}_update_manager"]
-    client = hass.data[DOMAIN]["sleepme_controller"]
-    device_info_data = hass.data[DOMAIN]["device_info"]
+    """Set up the SleepMe climate entities from a config entry."""
+    entry_data = hass.data[DOMAIN][config_entry.entry_id]
+    update_manager = entry_data["update_manager"]
+    client = entry_data["client"]
+    device_info_data = entry_data["device_info"]
 
     async_add_entities(
         [
             SleepMeClimateEntity(
-                update_manager, client, device_id, device_display_name, device_info_data
+                update_manager, client, device_info_data
             )
         ]
     )
@@ -56,25 +55,24 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         self,
         coordinator: SleepMeUpdateManager,
         client: SleepMeClient,
-        device_id: str,
-        device_display_name: str,
         device_info_data: dict,
     ):
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self.client = client
-        self._device_id = device_id
         
-        self._attr_name = device_display_name
-        self._attr_unique_id = f"{device_id}_climate"
+        display_name = device_info_data["display_name"]
+        
+        self._attr_name = display_name
+        self._attr_unique_id = f"{client.device_id}_climate"
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_hvac_modes = HVAC_MODES
         self._attr_supported_features = SUPPORT_FLAGS
         self._attr_preset_modes = [PRESET_PRECONDITIONING]
 
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": self._attr_name,
+            "identifiers": {(DOMAIN, client.device_id)},
+            "name": display_name,
             "manufacturer": MANUFACTURER,
             "model": device_info_data.get("model"),
             "sw_version": device_info_data.get("firmware_version"),
@@ -83,6 +81,9 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def hvac_mode(self):
         """Return the current HVAC mode."""
+        if not self.coordinator.data:
+            return HVACMode.OFF
+
         status = self.coordinator.data.get("status", {})
         thermal_status = status.get("thermal_control_status")
 
@@ -97,6 +98,9 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def hvac_action(self):
         """Return the current HVAC action."""
+        if not self.coordinator.data:
+            return HVAC_ACTION_OFF
+
         status = self.coordinator.data.get("status", {})
         thermal_status = status.get("thermal_control_status")
 
@@ -115,22 +119,24 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def preset_mode(self):
         """Return the current preset mode."""
-        status = self.coordinator.data.get("status", {})
-        if status.get("thermal_control_status") == "preconditioning":
-            return PRESET_PRECONDITIONING
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            if status.get("thermal_control_status") == "preconditioning":
+                return PRESET_PRECONDITIONING
         return None
 
     @property
     def current_temperature(self):
         """Return the current temperature."""
-        status = self.coordinator.data.get("status", {})
-        return status.get("current_temperature_c")
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            return status.get("current_temperature_c")
+        return None
 
     @property
     def target_temperature(self):
         """Return the target temperature."""
-        status = self.coordinator.data.get("status", {})
-        return status.get("set_temperature_c")
+        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
+            return status.get("set_temperature_c")
+        return None
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set a new target temperature."""
@@ -139,9 +145,9 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
             return
 
         if await self.client.set_temperature(temperature_c):
-            status = self.coordinator.data.get("status", {})
-            status["set_temperature_c"] = temperature_c
-            self.async_write_ha_state()
+            if self.coordinator.data and "status" in self.coordinator.data:
+                self.coordinator.data["status"]["set_temperature_c"] = temperature_c
+                self.async_write_ha_state()
             async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)
 
     async def async_set_hvac_mode(self, hvac_mode: str) -> None:
@@ -149,7 +155,7 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         is_active = hvac_mode in [HVACMode.COOL, HVACMode.HEAT]
 
         if await self.client.set_power_status(is_active):
-            status = self.coordinator.data.get("status", {})
-            status["thermal_control_status"] = "active" if is_active else "standby"
-            self.async_write_ha_state()
+            if self.coordinator.data and "status" in self.coordinator.data:
+                self.coordinator.data["status"]["thermal_control_status"] = "active" if is_active else "standby"
+                self.async_write_ha_state()
             async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)
