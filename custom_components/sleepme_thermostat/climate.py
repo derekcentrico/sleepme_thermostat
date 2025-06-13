@@ -1,14 +1,14 @@
 import logging
+import asyncio
 from typing import Any
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.event import async_call_later
 
 from .const import (
     DOMAIN,
@@ -26,7 +26,7 @@ from .update_manager import SleepMeUpdateManager
 
 _LOGGER = logging.getLogger(__name__)
 
-COMMAND_REFRESH_DELAY_S = 5
+COMMAND_DEBOUNCE_S = 2
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -60,6 +60,9 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self.client = client
+        self._debounce_task = None
+        self._pending_power = None
+        self._pending_temp_c = None
         
         display_name = device_info_data["display_name"]
         
@@ -77,19 +80,19 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
             "model": device_info_data.get("model"),
             "sw_version": device_info_data.get("firmware_version"),
         }
-
+    
     @property
     def hvac_mode(self):
         """Return the current HVAC mode."""
         if not self.coordinator.data:
             return HVACMode.OFF
-
-        status = self.coordinator.data.get("status", {})
-        thermal_status = status.get("thermal_control_status")
+        
+        control = self.coordinator.data.get("control", {})
+        thermal_status = control.get("thermal_control_status")
 
         if thermal_status in ["active", "preconditioning"]:
-            set_temp = status.get("set_temperature_c")
-            current_temp = status.get("current_temperature_c")
+            set_temp = control.get("set_temperature_c")
+            current_temp = self.coordinator.data.get("status", {}).get("water_temperature_c")
             if set_temp is not None and current_temp is not None:
                 return HVACMode.COOL if set_temp < current_temp else HVACMode.HEAT
             return HVACMode.COOL
@@ -101,12 +104,13 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         if not self.coordinator.data:
             return HVAC_ACTION_OFF
 
+        control = self.coordinator.data.get("control", {})
         status = self.coordinator.data.get("status", {})
-        thermal_status = status.get("thermal_control_status")
+        thermal_status = control.get("thermal_control_status")
 
         if thermal_status in ["active", "preconditioning"]:
-            set_temp = status.get("set_temperature_c")
-            current_temp = status.get("current_temperature_c")
+            set_temp = control.get("set_temperature_c")
+            current_temp = status.get("water_temperature_c")
             if set_temp is not None and current_temp is not None:
                 if set_temp < current_temp:
                     return HVAC_ACTION_COOLING
@@ -119,8 +123,8 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def preset_mode(self):
         """Return the current preset mode."""
-        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            if status.get("thermal_control_status") == "preconditioning":
+        if self.coordinator.data and (control := self.coordinator.data.get("control", {})):
+            if control.get("thermal_control_status") == "preconditioning":
                 return PRESET_PRECONDITIONING
         return None
 
@@ -128,34 +132,59 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
     def current_temperature(self):
         """Return the current temperature."""
         if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            return status.get("current_temperature_c")
+            return status.get("water_temperature_c")
         return None
 
     @property
     def target_temperature(self):
         """Return the target temperature."""
-        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            return status.get("set_temperature_c")
+        if self.coordinator.data and (control := self.coordinator.data.get("control", {})):
+            return control.get("set_temperature_c")
         return None
+
+    async def _async_send_debounced_commands(self):
+        """Send the queued commands to the API after a debounce period."""
+        if self._pending_power is not None:
+            await self.client.set_power_status(self._pending_power)
+            self._pending_power = None
+            await asyncio.sleep(1)
+
+        if self._pending_temp_c is not None:
+            await self.client.set_temperature(self._pending_temp_c)
+            self._pending_temp_c = None
+
+        await self.coordinator.async_request_refresh()
+
+    def _debounce_command(self):
+        """Cancel existing debounce timer and start a new one."""
+        if self._debounce_task:
+            self._debounce_task.cancel()
+        
+        self._debounce_task = self.hass.async_create_task(
+            self._async_send_debounced_commands()
+        )
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set a new target temperature."""
         temperature_c = kwargs.get(ATTR_TEMPERATURE)
         if temperature_c is None:
             return
+        
+        if self.coordinator.data and "control" in self.coordinator.data:
+            self.coordinator.data["control"]["set_temperature_c"] = temperature_c
+            self.async_write_ha_state()
 
-        if await self.client.set_temperature(temperature_c):
-            if self.coordinator.data and "status" in self.coordinator.data:
-                self.coordinator.data["status"]["set_temperature_c"] = temperature_c
-                self.async_write_ha_state()
-            async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)
+        self._pending_temp_c = temperature_c
+        self._debounce_command()
+
 
     async def async_set_hvac_mode(self, hvac_mode: str) -> None:
         """Set a new HVAC mode."""
         is_active = hvac_mode in [HVACMode.COOL, HVACMode.HEAT]
+        
+        if self.coordinator.data and "control" in self.coordinator.data:
+            self.coordinator.data["control"]["thermal_control_status"] = "active" if is_active else "standby"
+            self.async_write_ha_state()
 
-        if await self.client.set_power_status(is_active):
-            if self.coordinator.data and "status" in self.coordinator.data:
-                self.coordinator.data["status"]["thermal_control_status"] = "active" if is_active else "standby"
-                self.async_write_ha_state()
-            async_call_later(self.hass, COMMAND_REFRESH_DELAY_S, self.coordinator.async_request_refresh)
+        self._pending_power = is_active
+        self._debounce_command()

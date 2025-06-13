@@ -67,7 +67,7 @@ class SleepMeWaterLevelPercentSensor(BaseSleepMeSensor):
     def native_value(self):
         """Return the state of the sensor."""
         if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            return status.get("water_level_percent")
+            return status.get("water_level")
         return None
 
 
@@ -83,8 +83,8 @@ class SleepMeSetTemperatureSensor(BaseSleepMeSensor):
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            return status.get("set_temperature_c")
+        if self.coordinator.data and (control := self.coordinator.data.get("control", {})):
+            return control.get("set_temperature_c")
         return None
 
 
@@ -101,5 +101,5 @@ class SleepMeCurrentTemperatureSensor(BaseSleepMeSensor):
     def native_value(self):
         """Return the state of the sensor."""
         if self.coordinator.data and (status := self.coordinator.data.get("status", {})):
-            return status.get("current_temperature_c")
+            return status.get("water_temperature_c")
         return None
