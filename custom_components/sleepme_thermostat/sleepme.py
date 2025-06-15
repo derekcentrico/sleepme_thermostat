@@ -28,7 +28,8 @@ class SleepMeClient:
     
     async def set_temperature(self, temperature_c: float) -> bool:
         """Set the target temperature of the device in Celsius."""
-        return await self.patch_command({"set_temperature_c": temperature_c})
+        rounded_temp = round(temperature_c, 1)
+        return await self.patch_command({"set_temperature_c": rounded_temp})
 
     async def set_power_status(self, is_active: bool) -> bool:
         """Set the power status of the device."""

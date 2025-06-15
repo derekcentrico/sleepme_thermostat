@@ -15,6 +15,7 @@ from .const import (
 )
 from .sleepme import SleepMeClient
 from .update_manager import SleepMeUpdateManager
+from .debouncer import Debouncer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +43,11 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self.client = client
+        
+        self._pending_payload = {}
+        self._command_debouncer = Debouncer(
+            self.hass, 2.0, self._async_send_commands
+        )
         
         display_name = device_info_data["display_name"]
         
@@ -105,6 +111,17 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
             return control.get("set_temperature_c")
         return None
 
+    async def _async_send_commands(self):
+        """Send the debounced command payload to the API."""
+        if not self._pending_payload:
+            return
+
+        payload_to_send = self._pending_payload.copy()
+        self._pending_payload.clear()
+
+        if await self.client.patch_command(payload_to_send):
+            await self.coordinator.async_request_refresh()
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set a new target temperature."""
         temperature_c = kwargs.get(ATTR_TEMPERATURE)
@@ -113,15 +130,17 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         if self.coordinator.data and "control" in self.coordinator.data:
             self.coordinator.data["control"]["set_temperature_c"] = temperature_c
             self.async_write_ha_state()
-
-        await self.client.set_temperature(temperature_c)
+        
+        self._pending_payload["set_temperature_c"] = round(temperature_c, 1)
+        self._command_debouncer.async_schedule()
 
     async def async_set_hvac_mode(self, hvac_mode: str) -> None:
         """Set a new HVAC mode."""
         is_active = hvac_mode in [HVACMode.COOL, HVACMode.HEAT]
-
+        
         if self.coordinator.data and "control" in self.coordinator.data:
             self.coordinator.data["control"]["thermal_control_status"] = "active" if is_active else "standby"
             self.async_write_ha_state()
 
-        await self.client.set_power_status(is_active)
+        self._pending_payload["thermal_control_status"] = "active" if is_active else "standby"
+        self._command_debouncer.async_schedule()
