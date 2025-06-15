@@ -1,12 +1,11 @@
 import logging
-import asyncio
 from typing import Any
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import HVACMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -43,7 +42,6 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self.client = client
-        self._last_command_sent_time = 0
         
         display_name = device_info_data["display_name"]
         
@@ -59,32 +57,6 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
             "name": display_name, "manufacturer": MANUFACTURER,
             "model": device_info_data.get("model"), "sw_version": device_info_data.get("firmware_version"),
         }
-
-    async def async_send_command(self, payload: dict):
-        """Send a command with rate-limiting guard."""
-        now = self.hass.loop.time()
-        time_since_last_command = now - self._last_command_sent_time
-        
-        if time_since_last_command < 2:
-            await asyncio.sleep(2 - time_since_last_command)
-        
-        success = await self.client.patch_command(payload)
-        self._last_command_sent_time = self.hass.loop.time()
-        
-        if success:
-            await asyncio.sleep(2)
-            await self.coordinator.async_request_refresh()
-
-    async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set a new target temperature."""
-        temperature_c = kwargs.get(ATTR_TEMPERATURE)
-        if temperature_c is None: return
-        await self.async_send_command({"set_temperature_c": temperature_c})
-
-    async def async_set_hvac_mode(self, hvac_mode: str) -> None:
-        """Set a new HVAC mode."""
-        is_active = hvac_mode in [HVACMode.COOL, HVACMode.HEAT]
-        await self.async_send_command({"thermal_control_status": "active" if is_active else "standby"})
 
     @property
     def hvac_mode(self):
@@ -132,3 +104,24 @@ class SleepMeClimateEntity(CoordinatorEntity, ClimateEntity):
         if self.coordinator.data and (control := self.coordinator.data.get("control", {})):
             return control.get("set_temperature_c")
         return None
+
+    async def async_set_temperature(self, **kwargs: Any) -> None:
+        """Set a new target temperature."""
+        temperature_c = kwargs.get(ATTR_TEMPERATURE)
+        if temperature_c is None: return
+
+        if self.coordinator.data and "control" in self.coordinator.data:
+            self.coordinator.data["control"]["set_temperature_c"] = temperature_c
+            self.async_write_ha_state()
+
+        await self.client.set_temperature(temperature_c)
+
+    async def async_set_hvac_mode(self, hvac_mode: str) -> None:
+        """Set a new HVAC mode."""
+        is_active = hvac_mode in [HVACMode.COOL, HVACMode.HEAT]
+
+        if self.coordinator.data and "control" in self.coordinator.data:
+            self.coordinator.data["control"]["thermal_control_status"] = "active" if is_active else "standby"
+            self.async_write_ha_state()
+
+        await self.client.set_power_status(is_active)
